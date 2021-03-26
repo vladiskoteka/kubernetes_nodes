@@ -25,40 +25,89 @@
       repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu xenial stable
       state: present
 
-  - name: Install docker and its dependecies
-    apt: 
-      name: "{{ packages }}"
+  # - name: Install containerd.io #,docker and its dependecies
+  #   apt: 
+  #     name: "{{ packages }}"
+  #     state: present
+  #     update_cache: yes
+  #   vars:
+  #     packages:
+  #       - containerd.io
+    #    - docker-ce 
+    #    - docker-ce-cli 
+    #  notify:
+    #    - docker status
+
+  # - name: Add vagrant user to docker group
+  #   user:
+  #     name: vagrant
+  #     group: docker
+  - name: Add module overlay
+    modprobe:
+      name: "{{ item }}"
       state: present
-      update_cache: yes
-    vars:
-      packages:
-      - docker.io
-      - containerd
-    notify:
-      - docker status
-
-  - name: Creates directory
-    file:
-      path: /etc/docker
-      state: directory
-
-  - name: Creating a file with content
+    with_items:
+      - overlay
+      - br_netfilter
+    
+  - name: Create file containerd.conf
     copy:
-      dest: /etc/docker/daemon.json
+      dest: "/etc/modules-load.d/containerd.conf"
       content: |
-        {
-          "exec-opts": ["native.cgroupdriver=systemd"],
-          "log-driver": "json-file",
-          "log-opts": {
-            "max-size": "100m"
-          },
-          "storage-driver": "overlay2"
-        }
+        overlay
+        br_netfilter
 
-  - name: Add vagrant user to docker group
-    user:
-      name: vagrant
-      group: docker
+  - name: Create file 99-kubernetes-cri.conf
+    copy: 
+      dest: "/etc/sysctl.d/99-kubernetes-cri.conf"
+      content: |
+        net.bridge.bridge-nf-call-iptables  = 1
+        net.ipv4.ip_forward                 = 1
+        net.bridge.bridge-nf-call-ip6tables = 1
+
+  - name: Apply sysctl params without reboot
+    shell: sysctl --system
+    become: yes
+  
+  - name: Install containerd
+    apt: 
+      update_cache: yes 
+      force_apt_get: yes
+      pkg:
+        containerd
+        #state: present
+
+  - name: Ensure /etc/containerd exist
+    file: path=/etc/containerd state=directory
+
+  # - name: shell
+  #   shell: containerd config default | sudo tee /etc/containerd/config.toml
+  #   become: yes
+
+  # - name: edit /etc/containerd/config.toml
+  #   lineinfile:
+  #     path: /etc/containerd/config.toml
+  #     regexp: "privileged_without_host_devices = false"
+  #     insertafter: '^false'
+  #     line: SystemdCgroup = true #'{{ item.line }}'
+    #with_items:
+      #- [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      #- SystemdCgroup = true
+
+  - name: copy config.toml    
+    copy:
+      src: /home/vladiskoteka/Desktop/kube_getting/config.toml
+      dest: /etc/containerd/config.toml
+      owner: vagrant
+      group: vagrant
+      mode: '0644'
+
+
+  - name: restart containerd
+    ansible.builtin.systemd:
+      state: restarted
+      daemon_reload: yes
+      name: containerd
 
   - name: Remove swapfile from /etc/fstab
     mount:
@@ -72,7 +121,7 @@
   - name: Disable swap
     command: swapoff -a
     when: ansible_swaptotal_mb > 0
-  
+
   - name: Add an apt signing key for Kubernetes
     apt_key:
       url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
@@ -93,7 +142,7 @@
       packages:
         - kubelet 
         - kubeadm 
-        - kubectl
+        #- kubectl
 
   - name: Configure node ip
     lineinfile:
@@ -108,16 +157,11 @@
       daemon_reload: yes
       state: restarted
   
-  - name: Connect to master
-    command: kubeadm join 10.100.10.1:6443 --token 94vn3y.wu78nnfwmlcw70qe --discovery-token-ca-cert-hash sha256:978c994f389e2f38395877adc7334c9d82379c7d0fe97aec3470d9628601af96 
+  # - name: wait 30 sec
+  #   wait_for:
+  #     timeout: 30
+    
+  - name: add to kube master
+    shell: "{{ kubernetes_token }}"
+    become: yes
 
-  - name: Setup kubeconfig for vagrant user
-    command: "{{ item }}"
-    with_items:
-     - mkdir -p /home/vagrant/.kube
-     - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
-     - chown vagrant:vagrant /home/vagrant/.kube/config
-
-  handlers:
-    - name: docker status
-      service: name=docker state=started
